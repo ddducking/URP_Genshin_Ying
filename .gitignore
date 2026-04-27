@@ -1,0 +1,6 @@
+# Ignore everything except shader files
+*
+!/.gitignore
+!/Assets/shader/
+/Assets/shader/*
+!/Assets/shader/*.shader
