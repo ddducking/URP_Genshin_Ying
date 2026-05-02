@@ -21,6 +21,14 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
         //日夜切换开关
         [Header(Lighting Options)]
         _DayOrNight ("Day Or Night",Range(0,1)) = 0//日夜切换参数
+
+        //菲涅尔边缘光
+        [Header(Fresnel Rim Lighting)]
+        [Toggle(_USE_RIM_LIGHTING)] _UseRimLighting("Use Rim Lighting", Range(0,1)) = 1
+        [HDR] _RimColor ("Rim Color", Color) = (0.3, 0.3, 0.3, 1)// 边缘光颜色（建议 HDR，配合 Bloom 更好看）
+        _FresnelPower ("Fresnel Power", Range(0.1, 10)) = 3.0// 边缘光范围（菲涅尔幂次，越大边缘光越窄，推荐 2~5）
+        _RimIntensity ("Rim Intensity", Range(0, 5)) = 1.0// 边缘光强度（独立亮度控制，方便脚本驱动）
+
     }
     SubShader//子着色器（包含一个或多个Pass）
     {
@@ -43,6 +51,7 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
 
                 #pragma shader_feature_local _USE_LIGHTMAP_AO // 是否使用光照贴图AO（局部定义的着色器特性）
                 #pragma shader_feature_local _USE_RAMP_SHADOW // 是否使用色阶阴影贴图（局部定义的着色器特性）
+                #pragma shader_feature_local _USE_RIM_LIGHTING // 是否使用边缘光
 
                 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl" // 核心库
                 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl" // 光照库
@@ -70,6 +79,11 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
 
                     //日夜切换
                     float _DayOrNight;//日夜切换开关
+
+                    //Fresnel Rim Lighting
+                    float4 _RimColor;//边缘光颜色
+                    float _FresnelPower;//边缘光范围
+                    float _RimIntensity;//边缘光强度
                 CBUFFER_END//常量缓冲区结束
 
                 // 官方版本的RampShadowID函数
@@ -115,6 +129,7 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
                     float2 uv0 : TEXCOORD0;//第一套纹理坐标
                     float3 normalWS : TEXCOORD1;//世界坐标法线
                     float4 color : TEXCOORD2;//顶点颜色
+                    float3 positionWS : TEXCOORD3;
                 };
 
                 //顶点着色器函数：处理顶点（如位置、法线、UV等）（返回裁剪空间坐标）
@@ -123,8 +138,9 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
                     UniversalVaryings output;//定义顶点着色器返回值
 
                     //position
-                    VertexPositionInputs vertexInputs = GetVertexPositionInputs(input.positionOS.xyz);//转换顶点空间
+                    VertexPositionInputs vertexInputs = GetVertexPositionInputs(input.positionOS .xyz);//转换顶点空间
                     output.positionCS = vertexInputs.positionCS;//将裁剪空间坐标传递给输出变量
+                    output.positionWS = vertexInputs.positionWS;//将世界空间坐标传递给输出变量
 
                     //normal
                     VertexNormalInputs vertexNormalInputs = GetVertexNormalInputs(input.normalOS);//转换法线空间
@@ -142,6 +158,7 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
                 //片元着色器函数：处理像素（如颜色、纹理采样、光照等）（返回最终颜色）
                 half4 MainFS(UniversalVaryings input): SV_TARGET
                 {
+                    //Obtain Information
                     Light light = GetMainLight();//获取主光源信息（如方向、颜色等）
                     half4 vertexColor = input.color;//获取顶点颜色
 
@@ -190,13 +207,24 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
                     half3 rampNightColor = SAMPLE_TEXTURE2D(_RampTex, sampler_RampTex, rampNightUV).rgb;//从色阶阴影贴图采样颜色（使用计算得到的UV坐标）（夜晚）
                     
                     half3 rampColor = lerp(rampDayColor,rampNightColor,_DayOrNight);//根据lerp函数来确定选择最终颜色
+
+                    //Fresnel Rim Lighting
+                    half3 viewDir = normalize(_WorldSpaceCameraPos.xyz - input.positionWS);//视线方向（从顶点指向摄像机）
+                    half NdotV = saturate(dot(N,viewDir));//法线与视线方向的点积（视角与法线越垂直，值越接近0）
+                    half fresnel  = pow(1.0 - NdotV,_FresnelPower);//菲涅尔系数（视角越平行于表面，fresnel越大，边缘越亮）
                     
 
                     //final color calculation
+                    half3 finalColor;
                     #if _USE_RAMP_SHADOW // 使用ramp阴影贴图
-                        half3 finalColor = baseMap.rgb * rampColor * (isShadowArea ? 1 : 1.2);//最终颜色，使用ramp阴影
+                        finalColor = baseMap.rgb * rampColor * (isShadowArea ? 1 : 1.2);//最终颜色，使用ramp阴影
                     #else // 不使用ramp阴影贴图
-                        half3 finalColor = baseMap.rgb * halfLambert  * (shadow + 0.2);//最终颜色,使用兰伯特阴影
+                        finalColor = baseMap.rgb * halfLambert  * (shadow + 0.2);//最终颜色,使用兰伯特阴影
+                    #endif
+
+                    #if _USE_RIM_LIGHTING
+                        half3 rimColor = _RimColor.rgb * fresnel * _RimIntensity;
+                        finalColor += rimColor;
                     #endif
 
                     return half4(finalColor.rgb, 1);//返回最终颜色（RGB来自基础贴图，Alpha来自基础贴图）
@@ -222,7 +250,7 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
             ENDHLSL//着色器程序结束
         }
 
-        Pass//渲染通道 正面
+        Pass//渲染通道 反面
         {
             Name"UniversalForward"//通道名称（可选）
             Tags
@@ -337,3 +365,4 @@ Shader "GenshinToon/Body"//着色器名称（在材质面板中可见）
 //26，04，24面部阴影（SDF）（完成）
 //26，04，26阴影投射（完成）
 //26，04，26布料反面渲染（完成）
+//26，04，26边缘光
